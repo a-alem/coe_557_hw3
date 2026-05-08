@@ -9,6 +9,7 @@ from ryu.ofproto import ofproto_v1_3
 class FirewallMonitor(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
+    # h3 in default Mininet single
     BLOCKED_IP = "10.0.0.3"
 
     def __init__(self, *args, **kwargs):
@@ -22,29 +23,37 @@ class FirewallMonitor(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         ofproto = datapath.ofproto
 
+        # Table-miss rule: send unknown packets to the controller
         match = parser.OFPMatch()
         actions = [
-            parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
-                                   ofproto.OFPCML_NO_BUFFER)
+            parser.OFPActionOutput(
+                ofproto.OFPP_CONTROLLER,
+                ofproto.OFPCML_NO_BUFFER,
+            )
         ]
 
-        self.add_flow(datapath, 0, match, actions)
+        self.add_flow(datapath, priority=0, match=match, actions=actions)
 
-        self.logger.info("Switch connected and table-miss rule installed")
+        self.logger.info("Switch connected. Table-miss rule installed.")
 
-    def add_flow(self, datapath, priority, match, actions):
+    def add_flow(self, datapath, priority, match, actions, idle_timeout=0, hard_timeout=0):
         parser = datapath.ofproto_parser
         ofproto = datapath.ofproto
 
-        inst = [
-            parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)
+        instructions = [
+            parser.OFPInstructionActions(
+                ofproto.OFPIT_APPLY_ACTIONS,
+                actions,
+            )
         ]
 
         mod = parser.OFPFlowMod(
             datapath=datapath,
             priority=priority,
             match=match,
-            instructions=inst,
+            instructions=instructions,
+            idle_timeout=idle_timeout,
+            hard_timeout=hard_timeout,
         )
 
         datapath.send_msg(mod)
@@ -62,11 +71,15 @@ class FirewallMonitor(app_manager.RyuApp):
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocol(ethernet.ethernet)
 
+        if eth is None:
+            return
+
         if eth.ethertype == ether_types.ETH_TYPE_LLDP:
             return
 
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
 
+        # Feature 1: Traffic monitoring
         if ip_pkt:
             self.logger.info(
                 "Packet #%d: %s -> %s",
@@ -75,39 +88,64 @@ class FirewallMonitor(app_manager.RyuApp):
                 ip_pkt.dst,
             )
 
-            if ip_pkt.src == self.BLOCKED_IP:
-                self.logger.warning("Blocked traffic from %s", ip_pkt.src)
+        # Feature 2: Firewall
+        if ip_pkt and ip_pkt.src == self.BLOCKED_IP:
+            self.logger.warning(
+                "BLOCKED traffic from %s to %s",
+                ip_pkt.src,
+                ip_pkt.dst,
+            )
 
-                match = parser.OFPMatch(
-                    eth_type=ether_types.ETH_TYPE_IP,
-                    ipv4_src=ip_pkt.src,
-                )
+            match = parser.OFPMatch(
+                eth_type=ether_types.ETH_TYPE_IP,
+                ipv4_src=ip_pkt.src,
+            )
 
-                self.add_flow(datapath, 100, match, [])
-                return
+            # Empty actions = drop
+            self.add_flow(
+                datapath=datapath,
+                priority=100,
+                match=match,
+                actions=[],
+                idle_timeout=0,
+                hard_timeout=0,
+            )
 
+            return
+
+        # Normal learning-switch behavior
         dpid = datapath.id
         self.mac_to_port.setdefault(dpid, {})
 
-        src = eth.src
-        dst = eth.dst
+        src_mac = eth.src
+        dst_mac = eth.dst
 
-        self.mac_to_port[dpid][src] = in_port
+        self.mac_to_port[dpid][src_mac] = in_port
 
-        if dst in self.mac_to_port[dpid]:
-            out_port = self.mac_to_port[dpid][dst]
+        if dst_mac in self.mac_to_port[dpid]:
+            out_port = self.mac_to_port[dpid][dst_mac]
         else:
             out_port = ofproto.OFPP_FLOOD
 
-        actions = [parser.OFPActionOutput(out_port)]
+        actions = [
+            parser.OFPActionOutput(out_port)
+        ]
 
         if out_port != ofproto.OFPP_FLOOD:
             match = parser.OFPMatch(
                 in_port=in_port,
-                eth_src=src,
-                eth_dst=dst,
+                eth_src=src_mac,
+                eth_dst=dst_mac,
             )
-            self.add_flow(datapath, 1, match, actions)
+
+            self.add_flow(
+                datapath=datapath,
+                priority=1,
+                match=match,
+                actions=actions,
+                idle_timeout=30,
+                hard_timeout=0,
+            )
 
         out = parser.OFPPacketOut(
             datapath=datapath,

@@ -12,6 +12,11 @@ sudo apt install -y net-tools iproute2 tcpdump wireshark-common
 sudo apt install -y mininet openvswitch-switch openvswitch-common
 ```
 
+Moreover, `iperf3` is required for testing, so please install it:
+```bash
+sudo apt install -y iperf3
+```
+
 Test that Mininet works properly, Mininet should create a small topology and hosts can ping each other with this command to test things out.
 ```bash
 sudo mn --test pingall
